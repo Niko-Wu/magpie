@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -115,7 +117,10 @@ func chatOnce(ctx context.Context, gw string) (*http.Response, string, error) {
 // the real server, two requests go at once and the third waits until the
 // first is a minute old, then is answered.
 func TestMaxRPMWaitsForRoomInTheMinute(t *testing.T) {
-	window := 1500 * time.Millisecond
+	// the window is long enough that the no-wait check below has room on
+	// both sides: a busy machine spent half of a 1.5s window on the turn
+	// (#1791), while a wrongly waiting request only comes after the span
+	window := 4 * time.Second
 	slackMinute(t, window, time.Minute)
 	// the first dials the connection the others reuse
 	v := &minuteVendor{late: 150 * time.Millisecond}
@@ -144,7 +149,7 @@ func TestMaxRPMWaitsForRoomInTheMinute(t *testing.T) {
 // reaches the vendor; nobody rests for it, and once the minute has room
 // the next is answered.
 func TestMaxRPMTooLongIs429WithRetryAfter(t *testing.T) {
-	window := 1500 * time.Millisecond
+	window := 4 * time.Second
 	shortMinute(t, window, 200*time.Millisecond)
 	v := &minuteVendor{}
 	_, gw := rpmGateway(t, v, 1)
@@ -156,8 +161,16 @@ func TestMaxRPMTooLongIs429WithRetryAfter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.StatusCode != 429 || res.Header.Get("Retry-After") != "2" || !strings.Contains(body, "1 requests a minute is its limit") {
-		t.Fatalf("second = %d Retry-After %q %s, want a 429 saying the limit, Retry-After 2", res.StatusCode, res.Header.Get("Retry-After"), body)
+	// Retry-After is the time left until the minute has room, in whole
+	// seconds, at least 1: a round of the test's own measurement of when
+	// the first went and the window (not a fixed "2" — #1791: a first
+	// request taking over 0.5s under load makes the wait left round to 1)
+	first := v.times()[0]
+	left := first.Add(window).Sub(began)
+	want := max(int(math.Ceil(left.Seconds())), 1)
+	got, gerr := strconv.Atoi(res.Header.Get("Retry-After"))
+	if res.StatusCode != 429 || gerr != nil || got < max(want-1, 1) || got > want || !strings.Contains(body, "1 requests a minute is its limit") {
+		t.Fatalf("second = %d Retry-After %q %s, want a 429 saying the limit with Retry-After %d or %d (about %s left)", res.StatusCode, res.Header.Get("Retry-After"), body, max(want-1, 1), want, left.Round(time.Millisecond))
 	}
 	if d := time.Since(began); d > window/2 {
 		t.Fatalf("turned away after %s, not at once", d)
@@ -207,7 +220,9 @@ func TestMaxRPMAgentGoneWhileWaiting(t *testing.T) {
 // vendor. With 3 a minute, one request tried twice and one count leave no
 // room, so the next chat waits for the minute.
 func TestMaxRPMCountsRetriesAndCounts(t *testing.T) {
-	window := 1500 * time.Millisecond
+	// room on both sides for the no-wait check below, as in
+	// TestMaxRPMWaitsForRoomInTheMinute (#1791)
+	window := 4 * time.Second
 	slackMinute(t, window, time.Minute)
 	v := &minuteVendor{fail: 1, late: 150 * time.Millisecond}
 	_, gw := rpmGateway(t, v, 3)

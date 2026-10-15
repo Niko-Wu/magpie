@@ -15,14 +15,16 @@ import (
 )
 
 // clsUp is a Chat vendor that classifies: it answers what answer says,
-// after wait, and keeps what it was asked.
+// after wait, and keeps what it was asked. cancelled counts the asks whose
+// caller gave up on (their context ended while it was still waiting).
 type clsUp struct {
-	mu     sync.Mutex
-	answer string
-	fail   int
-	wait   time.Duration
-	asked  []string
-	agents []string
+	mu        sync.Mutex
+	answer    string
+	fail      int
+	wait      time.Duration
+	asked     []string
+	agents    []string
+	cancelled int
 }
 
 func (u *clsUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +37,9 @@ func (u *clsUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-time.After(wait):
 		case <-r.Context().Done():
+			u.mu.Lock()
+			u.cancelled++
+			u.mu.Unlock()
 			return
 		}
 	}
@@ -63,6 +68,13 @@ func (u *clsUp) set(answer string, fail int) {
 	u.mu.Lock()
 	u.answer, u.fail = answer, fail
 	u.mu.Unlock()
+}
+
+// gaveUp is how many asks their caller cancelled while it waited.
+func (u *clsUp) gaveUp() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.cancelled
 }
 
 // intented is ruled's group with a classifier, c/cls, and the rules given.
@@ -269,17 +281,24 @@ func TestIntentClassifierFails(t *testing.T) {
 	if !strings.Contains(out, "from kb") || r.Rule.N != 1 || r.Rule.Classified.Error != "" {
 		t.Fatalf("rested: %s %+v", out, r.Rule)
 	}
-	// slow: past the timeout it's no answer
+	// slow: past the timeout it's no answer, and the turn gave up on the
+	// stub rather than wait its 2s out (#1829: the whole turn was bounded
+	// at 1.5s, which a busy machine spent without the stub being waited)
 	was := classifyTimeout
 	classifyTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { classifyTimeout = was })
 	c.mu.Lock()
 	c.wait = 2 * time.Second
 	c.mu.Unlock()
-	t0 := time.Now()
 	out, r = postOK(t, s, "f4", chat("rename everything", nil, 0, ""))
-	if !strings.Contains(out, "from ka") || !strings.Contains(r.Rule.Classified.Error, "no answer") || time.Since(t0) > 1500*time.Millisecond {
-		t.Fatalf("slow: %s %+v %s", out, r.Rule, time.Since(t0))
+	if !strings.Contains(out, "from ka") || !strings.Contains(r.Rule.Classified.Error, "no answer") {
+		t.Fatalf("slow: %s %+v", out, *r.Rule.Classified)
+	}
+	// the stub is in the test server's own goroutine: it counts the
+	// cancellation just after the turn gives up on it, not before
+	within(t, "the turn giving up on the stub", func() bool { return c.gaveUp() > 0 })
+	if n := c.gaveUp(); n != 1 {
+		t.Fatalf("slow: %d asks cancelled, want 1", n)
 	}
 }
 
@@ -464,14 +483,16 @@ func TestIntentClassifierGroup(t *testing.T) {
 		t.Fatalf("asked d %d, c %d times", d.n(), c.n())
 	}
 	// cls classifies with r, r with cls: cls's own call for r asks nobody
+	// — it goes by its other rules. If the loop asked anyone, c would see
+	// more than its two asks (#1813: a 3s bound on the turn instead, which
+	// a busy machine spent without a loop).
 	cg, _, _ := provider.FindGroup("group/cls")
 	cg.Rules, cg.Classifier = []provider.Rule{{Use: "c/cls", Intent: "anything"}}, "group/r"
 	if err := provider.SaveGroup(cg); err != nil {
 		t.Fatal(err)
 	}
-	t0 := time.Now()
 	out, r = postOK(t, s, "g2", chat("rename that package", nil, 0, ""))
-	if !strings.Contains(out, "from kb") || r.Rule.N != 1 || r.Rule.Classified.Error != "" || c.n() != 2 || time.Since(t0) > 3*time.Second {
-		t.Fatalf("loop: %s %+v %+v %d %s", out, r.Rule, r.Rule.Classified, c.n(), time.Since(t0))
+	if !strings.Contains(out, "from kb") || r.Rule.N != 1 || r.Rule.Classified.Error != "" || c.n() != 2 {
+		t.Fatalf("loop: %s %+v %+v %d", out, r.Rule, r.Rule.Classified, c.n())
 	}
 }

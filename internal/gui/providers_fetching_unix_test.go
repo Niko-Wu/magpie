@@ -61,17 +61,15 @@ esac
 
 	mux := http.NewServeMux()
 	providerRoutes(mux, nil)
-	get := func(path string) (providersJSON, time.Duration) {
+	get := func(path string) providersJSON {
 		t.Helper()
-		start := time.Now()
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
-		took := time.Since(start)
 		var s providersJSON
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &s) != nil {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body)
 		}
-		return s, took
+		return s
 	}
 	slow := func(s providersJSON) (listed, found bool) {
 		for _, p := range s.Providers {
@@ -87,12 +85,13 @@ esac
 		return false, false
 	}
 
-	// who is signed in is known already, as it is once magpie has run
+	// who is signed in is known already, as it is once magpie has run.
+	// The answer's own state says the page didn't wait on Cursor's list:
+	// cursor is there without its models, and the lists are on their way
+	// (#1812: a 2s bound on the request instead, which a busy machine
+	// spent on the whole handler).
 	provider.All()
-	s, took := get("/api/providers")
-	if took > 2*time.Second {
-		t.Fatalf("the page waited %v for Cursor's list", took)
-	}
+	s := get("/api/providers")
 	if listed, found := slow(s); !found || listed {
 		t.Fatalf("cursor found %v, its list in %v before it was fetched", found, listed)
 	}
@@ -101,7 +100,7 @@ esac
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		s, _ = get("/api/providers")
+		s = get("/api/providers")
 		if listed, _ := slow(s); listed && !s.Fetching {
 			break
 		}
