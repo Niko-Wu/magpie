@@ -2150,7 +2150,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// way to Codex, and who sealed it remembered once it has answered
 	// (#1099)
 	var sealedBy *candidate
+	// whether this request's compaction was asked natively, whoever
+	// answers it: a fallback whose own setting is off seals it too, and
+	// only that key or account can read what it seals (#2271)
+	var nativeRoute bool
 	if from == provider.Responses && compactionTriggerIn(body) {
+		nativeRoute = s.nativeCompactionFor(asked)
 		watch := &compactionWatch{w: w}
 		w = watch
 		defer func() {
@@ -3111,7 +3116,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			if hit == nil || !hit.Compact {
 				answered(stuck, c, aff.Turn, call.Usage)
 			}
-			if s.compactsNatively(c.p, c.model) {
+			if s.compactsNatively(c.p, c.model) || nativeRoute {
 				sealedBy = &c
 			}
 			if hit != nil && !hit.Compact {

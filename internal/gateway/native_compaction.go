@@ -109,13 +109,20 @@ func (s *Server) nativeCompactionFor(asked string) bool {
 
 // keepsCompaction is whether body goes to p as it is for its compaction:
 // Codex's trigger, to one that carries it, or a sealed compaction, to one
-// set to compact natively. A translation would leave either out, so such
-// a request is relayed.
+// set to compact natively or to the one that sealed it. A translation
+// would leave either out, so such a request is relayed.
 func (s *Server) keepsCompaction(from provider.Protocol, p provider.Provider, model string, body []byte) bool {
 	if from != provider.Responses || !s.carriesCompaction(p, model) {
 		return false
 	}
-	return compactionTriggerIn(body) || p.CompactsOn(model) && len(sealedCompactions(body)) > 0
+	if compactionTriggerIn(body) || p.CompactsOn(model) && len(sealedCompactions(body)) > 0 {
+		return true
+	}
+	// one p sealed with its native setting off: the fallback that answered
+	// a natively asked compaction, whose key or account alone can read it.
+	// A translation would drop the compacted history unasked (#1099, #2271)
+	cp, ok := checkpointOf(body)
+	return ok && cp.Provider == p.ID
 }
 
 // checkpointWriter is who sealed a compaction: the key or account
@@ -297,8 +304,8 @@ func keepCandidates(cands []candidate, pl planned, keep func(candidate) bool) ([
 // checkpointError is what Codex is told when the compaction a request
 // carries was sealed by a key or account the request can't go to now.
 func checkpointError(model string, cp checkpointWriter) string {
-	return fmt.Sprintf("This conversation was compacted natively (native compaction is on for %s) by %s, and only that key or account can read the compaction it sealed. The request for %s can't go to it now: it is switched off, removed, or no longer serves %s. magpie doesn't send the compaction to another, which would refuse it, nor drop it or summarise it in its place, which would lose the conversation's earlier context. Switch %s on again for %s to go on with this conversation, or start a new one.",
-		cp.Provider, cp.Who, model, model, cp.Who, model)
+	return fmt.Sprintf("This conversation was compacted natively by %s, and only that key or account can read the compaction it sealed. The request for %s can't go to it now: it is switched off, removed, or no longer serves %s. magpie doesn't send the compaction to another, which would refuse it, nor drop it or summarise it in its place, which would lose the conversation's earlier context. Switch %s on again for %s to go on with this conversation, or start a new one.",
+		cp.Who, model, model, cp.Who, model)
 }
 
 // carrierError is what Codex is told when its compaction_trigger, asked

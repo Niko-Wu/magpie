@@ -137,6 +137,61 @@ func TestNativeCompactionStaysWithItsWriter(t *testing.T) {
 	}
 }
 
+// A provider set to compact natively whose key is down falls back, and
+// the fallback is asked Codex's compaction and seals it: who sealed it is
+// remembered all the same, whatever its own setting. The next turn goes
+// only to that key, as it came; a provider that isn't its writer is
+// refused saying so, not answered without the compacted history (#1099,
+// #2271).
+func TestNativeCompactionFallbackSealStaysWithItsWriter(t *testing.T) {
+	fresh(t)
+	seal := "gAAAAB-sealed-by-fallback"
+	down := &fake{t: t, ctype: "application/json", code: 500, reply: `{"error":{"message":"down"}}`}
+	d := httptest.NewServer(down)
+	t.Cleanup(d.Close)
+	fb := &fake{t: t, reply: nativeSealedReply(seal)}
+	b := httptest.NewServer(fb)
+	t.Cleanup(b.Close)
+	if err := provider.Save(provider.Provider{ID: "fa", Name: "A", Key: "ka", Models: []string{"m1"}, Responses: d.URL + "/v1", Fallback: []string{"fb/m1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "fb", Name: "B", Key: "kb", Models: []string{"m1"}, Responses: b.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	nativeOn(t, "fa")
+
+	// the primary is down: the fallback is asked the trigger as Codex sent
+	// it, and seals it
+	code, body := nativeAsk(t, "fa/m1", compactTurn)
+	if code != 200 || !strings.Contains(body, seal) {
+		t.Fatalf("compact: %d %s", code, body)
+	}
+	if !strings.Contains(string(fb.got), `{"type":"compaction_trigger"}`) {
+		t.Fatalf("the fallback was not asked the trigger: %s", fb.got)
+	}
+
+	// the next turn carries the seal to that key as it is, its own setting off
+	fb.reply = sse(`data: {"type":"response.completed","response":{"id":"resp_n","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+	next := `{"model":"%s","stream":true,"tools":[{"type":"web_search"}],"input":[{"type":"compaction","encrypted_content":"` + seal + `"},{"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}]}`
+	if code, body = nativeAsk(t, "fa/m1", next); code != 200 || !strings.Contains(string(fb.got), `"encrypted_content":"`+seal+`"`) {
+		t.Fatalf("the writer: %d %s\nfb got %s", code, body, fb.got)
+	}
+
+	// a provider that isn't its writer is refused, saying whose it is
+	other := &fake{t: t}
+	up := httptest.NewServer(other)
+	t.Cleanup(up.Close)
+	if err := provider.Save(provider.Provider{ID: "other", Name: "Other", Key: "k2", Models: []string{"m1"}, Responses: up.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body = nativeAsk(t, "other/m1", next); code != 400 || !strings.Contains(body, "compacted natively") || !strings.Contains(body, "fb#") {
+		t.Fatalf("another provider: %d %s", code, body)
+	}
+	if other.calls != 0 {
+		t.Errorf("the other provider was sent it: %s", other.got)
+	}
+}
+
 // GitHub Copilot's GPT models answer on Responses, so a Copilot account
 // set to compact natively is asked Codex's compaction as it was sent; its
 // Claude models, on chat completions, keep magpie's summary.
