@@ -310,10 +310,10 @@ func (c *asideConnection) provider() (string, string) {
 		return "invalid", "Aside's provider configuration could not be read"
 	}
 	if p.Key == "" || p.URL == "" {
-		return "foreign", "Aside's magpie provider has no ownership credential; it will not be overwritten"
+		return "foreign", "Aside's magpie provider has no ownership credential: it was not added by magpie, so magpie will not overwrite it. To let magpie connect Aside, remove the providers.magpie entry from " + c.models + " (and its entry from the credentials.json beside it), then connect again."
 	}
 	if p.Key != gateway.TokenFor("aside") && p.Key != agentKeyAt("aside", c.at.gw()) {
-		return "foreign", "Aside's magpie provider belongs to another configuration; it will not be overwritten"
+		return "foreign", "Aside's magpie provider belongs to another configuration: it was not added by magpie, so magpie will not overwrite it. To let magpie connect Aside, remove the providers.magpie entry from " + c.models + " (and its entry from the credentials.json beside it), then connect again."
 	}
 	if !sameGateway(p.URL, c.at.v1()) {
 		return "invalid", "Aside's magpie provider points to another gateway; reconnect explicitly to use this one"

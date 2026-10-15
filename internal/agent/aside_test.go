@@ -196,6 +196,30 @@ func TestAsideForeignProviderAndSyncAreReadOnly(t *testing.T) {
 	}
 }
 
+// A hand-written magpie provider that isn't magpie's blocks Connect with
+// what there is to do about it: the file, the entry, and the removal that
+// lets magpie write its own (#1871).
+func TestAsideForeignProviderMessageSaysWhatToDo(t *testing.T) {
+	for _, modelsJSON := range []string{
+		`{"providers":{"magpie":{"apiKey":"someone-else","baseUrl":"https://other.invalid/v1"}}}`,
+		`{"providers":{"magpie":{"baseUrl":"https://other.invalid/v1"}}}`,
+	} {
+		_, models := asideHome(t)
+		writeFile(t, models, modelsJSON)
+		a := mustFindAside(t)
+		err := a.Connect()
+		if err == nil {
+			t.Fatal("foreign provider connected")
+		}
+		msg := err.Error()
+		for _, want := range []string{models, "providers.magpie", "credentials.json", "remove", "connect"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("message %q does not say %q", msg, want)
+			}
+		}
+	}
+}
+
 func TestAsideUnavailableRuntimeCanRegisterProvider(t *testing.T) {
 	settings, _ := asideHome(t)
 	before := readFile(settings)
