@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/proc"
 )
 
 func asideHome(t *testing.T) (string, string) {
@@ -217,6 +219,32 @@ func TestAsideForeignProviderMessageSaysWhatToDo(t *testing.T) {
 				t.Fatalf("message %q does not say %q", msg, want)
 			}
 		}
+	}
+}
+
+// Aside's binary, found through proc.FindTool (its folders include
+// ~/.local/bin, which the PATH of the shell magpie was started from need
+// not have), is the one magpie runs: apply from such a shell failed with
+// "exec: aside: executable file not found in $PATH" although the binary
+// was there (#1871, the same class as #839 and #1482).
+func TestAsideSetRunsTheFoundBinary(t *testing.T) {
+	home := syncHome(t)
+	local := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(local, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin, body := filepath.Join(local, "aside"), "#!/bin/sh\necho "+asideOK+"\n"
+	if runtime.GOOS == "windows" {
+		bin, body = bin+".bat", "@echo off\r\necho "+asideOK+"\r\n"
+	}
+	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+	proc.Forget()
+	t.Cleanup(proc.Forget)
+	if err := asideRunning("u0", "console.log('"+asideOK+"')"); err != nil {
+		t.Fatalf("apply could not run the aside magpie found: %v", err)
 	}
 }
 

@@ -25,7 +25,7 @@ var asideRead = func(account string) (map[string]json.RawMessage, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), asideTimeout)
 	defer cancel()
-	out, err := proc.CommandContext(ctx, "aside", "repl", "--account", account, "--host", "local",
+	out, err := proc.CommandContext(ctx, asideBin(), "repl", "--account", account, "--host", "local",
 		"console.log('MAGPIE_ASIDE_STATE '+JSON.stringify({defaultModel:aside.settings.get('defaultModel'),modelCategories:aside.settings.get('modelCategories'),imageGenerationModel:aside.settings.get('imageGenerationModel')}))").Output()
 	if err != nil {
 		return nil, fmt.Errorf("Aside settings could not be read: %w", err)

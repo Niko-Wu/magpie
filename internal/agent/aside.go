@@ -86,10 +86,28 @@ var asideTimeout = 10 * time.Second
 
 const asideOK = "MAGPIE_ASIDE_OK"
 
-var asideSet = func(account, expr string) error {
+// asideBin is the Aside command magpie runs: the binary it finds on this
+// machine, else the name as a terminal spells it. magpie finds Aside's
+// binary through proc.FindTool — its folders include ~/.local/bin and the
+// rest of a user's tool dirs, which the PATH of the shell magpie was
+// started from need not have (the same as #839 and #1482 found for Claude
+// Code) — but running it by the bare name asks only that PATH: apply
+// failed with "exec: aside: executable file not found in $PATH" although
+// the binary is there. It runs the binary magpie found (#1871).
+func asideBin() string {
+	if p := proc.FindTool("aside"); p != "" {
+		return p
+	}
+	return "aside"
+}
+
+var asideSet = asideRunning
+
+// asideRunning is asideSet's work: it runs the binary asideBin found.
+func asideRunning(account, expr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), asideTimeout)
 	defer cancel()
-	out, err := proc.CommandContext(ctx, "aside", "repl", "--account", account, "--host", "local", expr).Output()
+	out, err := proc.CommandContext(ctx, asideBin(), "repl", "--account", account, "--host", "local", expr).Output()
 	if err != nil {
 		return fmt.Errorf("Aside did not accept the settings change: %w", err)
 	}
