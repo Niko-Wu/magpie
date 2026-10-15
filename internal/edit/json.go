@@ -137,6 +137,9 @@ func nest(parts []string, value any) any {
 	return value
 }
 
+// SplitPath splits a key path at its dots, as gjson does.
+func SplitPath(keyPath string) []string { return splitPath(keyPath) }
+
 // splitPath splits a key path at its dots, as gjson does: a dot escaped
 // with a backslash is part of the key (VS Code's settings.json keeps
 // "chat.defaultModel" as one key). The parts keep their escapes, for gjson.

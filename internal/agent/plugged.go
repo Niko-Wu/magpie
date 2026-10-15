@@ -52,6 +52,12 @@ type pluggedStash struct {
 	// Wrote are the strings magpie wrote, by key, for Check to tell
 	// one changed since
 	Wrote map[string]string `json:"wrote,omitempty"`
+	// Parents are the objects above a nested key that the file had
+	// nothing of when magpie wrote it: magpie's own making, so its
+	// removal takes them out too, emptied or gone, and the user's
+	// file isn't left an empty shell (#1816). An object the file had
+	// before, empty or not, is never in here.
+	Parents []string `json:"parents,omitempty"`
 }
 
 // PluginErrors is why an agent a plugin adds isn't listed, by plugin
@@ -207,6 +213,58 @@ func (f pluggedFile) del(keys []string) error {
 	return edit.DelEnvFile(f.path, keys...)
 }
 
+// keyParts is a key path split the way the format's own reads and deletes
+// split it.
+func (f pluggedFile) keyParts(key string) []string {
+	if f.format == "json" {
+		return edit.SplitPath(key)
+	}
+	return strings.Split(key, ".")
+}
+
+// parents is the objects a nested key path goes through, outermost first.
+// An env file has none: its keys are whole names, not nested.
+func (f pluggedFile) parents(key string) []string {
+	if f.format == "env" {
+		return nil
+	}
+	parts := f.keyParts(key)
+	out := make([]string, 0, len(parts)-1)
+	for i := 1; i < len(parts); i++ {
+		out = append(out, strings.Join(parts[:i], "."))
+	}
+	return out
+}
+
+// emptyShell is a parent object magpie made that its removals have
+// emptied: both formats write an object left with nothing in it as {}.
+func (f pluggedFile) emptyShell(key string) bool {
+	v, ok := f.raw(key)
+	return ok && strings.TrimSpace(v) == "{}"
+}
+
+// dropEmpty takes out the parent objects magpie made for its nested keys
+// that are now empty shells, innermost first so a parent emptied by the
+// removal of its own emptied child goes too (#1816). A parent the user
+// had, empty or not, was never recorded and stays; one the user filled in
+// since magpie made it isn't a shell; one that can't be read back is
+// unknown, not empty, and stays.
+func (f pluggedFile) dropEmpty(parents []string) error {
+	inner := slices.Clone(parents)
+	slices.SortFunc(inner, func(a, b string) int {
+		return len(f.keyParts(b)) - len(f.keyParts(a))
+	})
+	for _, p := range inner {
+		if !f.emptyShell(p) {
+			continue
+		}
+		if err := f.del([]string{p}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // plugged is the Agent of a plugin's agent at home.
 func plugged(home string, p *agentplug.Agent) *Agent {
 	d := p.Desc
@@ -238,7 +296,9 @@ func plugged(home string, p *agentplug.Agent) *Agent {
 		}
 		return st, true
 	}
-	// restore puts back what the user had under every key magpie wrote
+	// restore puts back what the user had under every key magpie wrote,
+	// and takes out the parent objects magpie made whose keys all went
+	// (#1816)
 	restore := func(st pluggedStash) error {
 		var del []string
 		var kvs []edit.KV
@@ -253,6 +313,9 @@ func plugged(home string, p *agentplug.Agent) *Agent {
 			return err
 		}
 		if err := f.set(kvs); err != nil {
+			return err
+		}
+		if err := f.dropEmpty(st.Parents); err != nil {
 			return err
 		}
 		forget(key)
@@ -311,6 +374,14 @@ func plugged(home string, p *agentplug.Agent) *Agent {
 				st.Had[kv.Path] = v
 			} else {
 				st.Had[kv.Path] = "\x00"
+				// the objects above a key the file had nothing of are
+				// magpie's own making, and its removals take them out
+				// once emptied (#1816)
+				for _, p := range f.parents(kv.Path) {
+					if _, had := f.raw(p); !had && !slices.Contains(st.Parents, p) {
+						st.Parents = append(st.Parents, p)
+					}
+				}
 			}
 		}
 		// a key magpie wrote before that connect no longer returns gets
@@ -332,6 +403,12 @@ func plugged(home string, p *agentplug.Agent) *Agent {
 			return err
 		}
 		if err := f.set(kvs); err != nil {
+			return err
+		}
+		// a parent magpie made that this write left with nothing in it
+		// goes too, so a model move that empties one branch doesn't
+		// leave its shell behind (#1816)
+		if err := f.dropEmpty(st.Parents); err != nil {
 			return err
 		}
 		save(st)
