@@ -24,16 +24,18 @@ func TestPayloadTooLargeIsNotContextOverflow(t *testing.T) {
 		if tooLong(413, msg) || overflowed(413, []byte(msg)) {
 			t.Errorf("byte limit classified as token limit: %s", msg)
 		}
-		p := provider.Provider{ID: "fake", Name: "Fake", Contexts: map[string]int{"m": 100}}
-		// Image bytes don't make a text estimate pass the token margin.
+		// Image bytes don't make a text estimate pass the token margin: a
+		// window over what the one image costs is one its base64 never
+		// passes, whatever the bytes it is written in.
 		tokens := estimate(&Request{Messages: []Message{{Role: "user", Parts: []Part{
 			{Kind: Text, Text: strings.Repeat("word", 100)},
 			{Kind: Image, Data: strings.Repeat(pngA, 4096)},
 		}}}})
+		p := provider.Provider{ID: "fake", Name: "Fake", Contexts: map[string]int{"m": tokens}}
 		if inferred, ok := tooLongUnsaid(p, "m", tokens, 413, []byte(msg)); ok {
 			t.Errorf("byte limit inferred as token limit: %s", inferred)
 		}
-		if inferred, ok := tooLongUnsaid(p, "m", 1000, 413, []byte(msg)); !ok || !strings.Contains(inferred, "prompt is too long") {
+		if inferred, ok := tooLongUnsaid(p, "m", tokens+tokens, 413, []byte(msg)); !ok || !strings.Contains(inferred, "prompt is too long") {
 			t.Errorf("text estimate past the window lost compaction: %s", inferred)
 		}
 		if retryable(413, []byte(msg)) {

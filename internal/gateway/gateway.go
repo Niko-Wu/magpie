@@ -1729,16 +1729,24 @@ func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
 
 // estimate is a token count from sizes, for clients that ask before sending.
 func estimate(req *Request) int {
+	imgs := 0 // images are counted in tokens already, not in bytes
 	n := len(req.System)
 	for _, m := range req.Messages {
 		for _, p := range m.Parts {
+			if p.Kind == Image {
+				// an image part has no text and no bytes here but its
+				// base64: it is counted as the prompt's parts count one,
+				// from the image's own size (#4239)
+				imgs += imageDataTokens(strings.NewReader(p.Data))
+				continue
+			}
 			n += len(p.Text) + len(p.Args) + len(p.Name)
 		}
 	}
 	for _, t := range req.Tools {
 		n += len(t.Name) + len(t.Description) + len(t.Schema)
 	}
-	return n / 4
+	return n/4 + imgs
 }
 
 // serve routes one parsed-enough request to its provider.

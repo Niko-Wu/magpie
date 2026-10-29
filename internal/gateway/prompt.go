@@ -16,7 +16,11 @@ package gateway
 // requests' bodies the trace holds in memory (keepBody).
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"io"
 	"net/http"
 	"regexp"
 	"slices"
@@ -92,9 +96,82 @@ func tokensOf(s string) int {
 
 func rawTokens(b json.RawMessage) int { return (len(b) + 3) / 4 }
 
-// imageTokens is what an image is taken to cost: about what Anthropic
-// counts for a 1092×1092 one.
+// imageTokens is what an image is taken to cost when its size can't be
+// read: about what Anthropic counts for a 1092×1092 one.
 const imageTokens = 1600
+
+// An image costs what its pixels cost, at one token per imagePixel, and
+// never less than imageMinPixels' worth: the vendor counts an image
+// smaller than that as if it had that many pixels. A Claude Code
+// screenshot is far past a 1092×1092 image, and the flat imageTokens left
+// ~3.3x of a full-size one uncounted, so a long screenshot session went
+// past the model's window while magpie still saw headroom, and nothing
+// compacted (#4239). The numbers are the reporter's, one image and a short
+// text each: 1024×2048 counted 5,228 prompt tokens, 512×1024 2,469 and
+// 256×512 2,788. That is 3,000 tokens a megapixel where Anthropic's own
+// rule for a plain API call is 750 a megapixel, so what these count is
+// what magpie's Claude accounts are billed; it errs high, which compacts
+// a turn early rather than letting a session run past the window.
+const (
+	imagePixel     = 400
+	imageMinPixels = 1000 * 1000
+)
+
+// imageCost is what an image of w by h is taken to cost.
+func imageCost(w, h int) int {
+	px := int64(w) * int64(h)
+	if px < imageMinPixels {
+		px = imageMinPixels
+	}
+	return int(px / imagePixel)
+}
+
+// imageDataTokens is what an image's base64 is taken to cost, from its
+// header alone (codex's images read theirs this way too, fitHolds), and
+// imageTokens for one whose header can't be read.
+func imageDataTokens(r io.Reader) int {
+	cfg, _, err := image.DecodeConfig(base64.NewDecoder(base64.StdEncoding, r))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return imageTokens
+	}
+	return imageCost(cfg.Width, cfg.Height)
+}
+
+// imgTokens is what the image an image part's source JSON carries costs,
+// read from the base64 it holds whichever protocol wrote it, and
+// imageTokens for a source that holds none: a URL the vendor fetches, or a
+// document.
+func imgTokens(src []byte) int {
+	if b64 := imageBase64(src); b64 != nil {
+		return imageDataTokens(bytes.NewReader(b64))
+	}
+	return imageTokens
+}
+
+// imageBase64 is the base64 an image's source JSON carries, as a subslice
+// of it: Anthropic's source object and Gemini's inlineData hold it under
+// "data", Chat's image_url and Responses' input_image in a data: URL.
+func imageBase64(src []byte) []byte {
+	if i := bytes.Index(src, []byte(`"data":"`)); i >= 0 {
+		return stringEnd(src[i+len(`"data":"`):])
+	}
+	if i := bytes.Index(src, []byte(";base64,")); i >= 0 {
+		return stringEnd(src[i+len(";base64,"):])
+	}
+	return nil
+}
+
+// stringEnd is b up to the end of the JSON string it begins, and nil when
+// that holds an escape, which base64 and the URLs beside it never do: the
+// bytes are read where they are, not copied, so that a source holding
+// megabytes of base64 costs its scan alone.
+func stringEnd(b []byte) []byte {
+	i := bytes.IndexByte(b, '"')
+	if i <= 0 || bytes.IndexByte(b[:i], '\\') >= 0 {
+		return nil
+	}
+	return b[:i]
+}
 
 // promptBuilder reads a body through decodeJSONView: what it keeps of
 // the body, a piece's raw JSON, lives only as long as the builder, which
@@ -797,7 +874,7 @@ func (b *promptBuilder) anthropicBlock(role string, x rawBlock) {
 		for _, c := range blocksOf(x.Content) {
 			switch c.Type {
 			case "image", "document":
-				b.add(PartFiles, c.Type, "image", imageTokens, imgPiece(c.Source))
+				b.add(PartFiles, c.Type, "image", imgTokens(c.Source), imgPiece(c.Source))
 			default:
 				n += tokensOf(c.Text)
 				texts = append(texts, c.Text)
@@ -814,7 +891,7 @@ func (b *promptBuilder) anthropicBlock(role string, x rawBlock) {
 			b.add(PartFiles, "document", "image", rawTokens(x.Source), rawPiece("", "", x.Source))
 			return
 		}
-		b.add(PartFiles, x.Type, "image", imageTokens, imgPiece(x.Source))
+		b.add(PartFiles, x.Type, "image", imgTokens(x.Source), imgPiece(x.Source))
 	default:
 		b.chat(tokensOf(x.Text), txt(role, x.Text))
 	}
@@ -935,7 +1012,7 @@ func (b *promptBuilder) responsesItem(raw json.RawMessage) {
 			}
 			for _, p := range parts {
 				if p.image {
-					b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.src))
+					b.add(PartFiles, "image", "image", imgTokens(p.src), imgPiece(p.src))
 					continue
 				}
 				b.userText(p.text)
@@ -979,7 +1056,7 @@ func (b *promptBuilder) responsesItem(raw json.RawMessage) {
 			var texts []string
 			for _, p := range responsesContent(it.Output) {
 				if p.image {
-					b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.src))
+					b.add(PartFiles, "image", "image", imgTokens(p.src), imgPiece(p.src))
 					continue
 				}
 				n += tokensOf(p.text)
@@ -1062,7 +1139,7 @@ func (b *promptBuilder) chatCompletions(body []byte) bool {
 			}
 			for _, p := range parts {
 				if p.image {
-					b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.src))
+					b.add(PartFiles, "image", "image", imgTokens(p.src), imgPiece(p.src))
 					continue
 				}
 				b.userText(p.text)
@@ -1072,7 +1149,7 @@ func (b *promptBuilder) chatCompletions(body []byte) bool {
 			var texts []string
 			for _, p := range parts {
 				if p.image {
-					b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.src))
+					b.add(PartFiles, "image", "image", imgTokens(p.src), imgPiece(p.src))
 					continue
 				}
 				n += tokensOf(p.text)
@@ -1170,7 +1247,7 @@ func (b *promptBuilder) gemini(body []byte) bool {
 				}
 				b.result(id, rawTokens(p.FunctionResponse.Response), rawPiece("result", "", p.FunctionResponse.Response))
 			case len(p.InlineData) > 0 || len(p.FileData) > 0:
-				b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.InlineData))
+				b.add(PartFiles, "image", "image", imgTokens(p.InlineData), imgPiece(p.InlineData))
 			case c.Role == "model":
 				role := "assistant"
 				if p.Thought {

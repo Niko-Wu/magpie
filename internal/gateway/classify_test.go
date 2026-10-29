@@ -228,13 +228,15 @@ func TestIntentChoosesAmongRules(t *testing.T) {
 // The classifier isn't asked when no rule that could be the first to
 // match waits on an intent.
 func TestIntentNotAskedWhenItCantMatter(t *testing.T) {
+	// the tokens rule is past what an image alone costs, so that an image
+	// is the case where no rule matches, not a long text (#4239)
 	s, _, _, c := intented(t,
-		provider.Rule{Use: "b/big", Tokens: 1000},
+		provider.Rule{Use: "b/big", Tokens: 2000},
 		provider.Rule{Use: "b/big", Intent: "debugging", Agents: []string{"codex"}},
 		provider.Rule{Use: "a/small", Intent: "debugging"},
 	)
 	// a long request: the tokens rule is first to match whatever it says
-	_, r := postOK(t, s, "n1", chat(long(2000), nil, 0, ""))
+	_, r := postOK(t, s, "n1", chat(long(2400), nil, 0, ""))
 	if r.Rule.N != 1 || r.Rule.Classified != nil || c.n() != 0 {
 		t.Fatalf("long: %+v %d", r.Rule, c.n())
 	}
