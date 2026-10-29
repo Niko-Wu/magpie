@@ -1373,7 +1373,7 @@ func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
 func responsesTool(t Tool) map[string]any {
 	tool := map[string]any{"type": "function", "name": t.Name, "description": t.Description, "strict": t.Strict}
 	if len(t.Schema) > 0 {
-		tool["parameters"] = t.Schema
+		tool["parameters"] = emptyObjectRoot(t.Schema)
 	}
 	return tool
 }

@@ -36,6 +36,71 @@ func (s *Server) foldsRoots(p provider.Provider, model string, proto provider.Pr
 	return p.Host() == "api.x.ai" || !s.fits(p.ID, rootUnionRefused(model), proto)
 }
 
+// emptyObjectRoot gives a tool's empty parameters root ({}) the object
+// type a strict upstream requires, and leaves any other schema as sent
+// (#4242: Claude Code's DeferredToolPlaceholder, refused by wb2api with
+// "Invalid tool definition"). Folding a union root stays with
+// objectSchema, which only an upstream that refuses one is asked for.
+func emptyObjectRoot(schema json.RawMessage) json.RawMessage {
+	if len(schema) > 0 && bytes.Equal(bytes.TrimSpace(schema), []byte(`{}`)) {
+		return json.RawMessage(`{"type":"object"}`)
+	}
+	return schema
+}
+
+// emptyRootsBody is a Chat or Responses body whose function tools' empty
+// parameters ({}) are given the object root a strict upstream requires
+// (#4242: Claude Code's DeferredToolPlaceholder, refused by wb2api with
+// "Invalid tool definition"), and whether any was changed.
+func emptyRootsBody(proto provider.Protocol, body []byte) ([]byte, bool) {
+	if (proto != provider.Chat && proto != provider.Responses) || !bytes.Contains(body, []byte(`{}`)) {
+		return body, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var m map[string]any
+	if dec.Decode(&m) != nil || m == nil {
+		return body, false
+	}
+	tools, _ := m["tools"].([]any)
+	if !fillEmptyRoots(proto, tools) {
+		return body, false
+	}
+	out, err := marshalPlain(m)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+// fillEmptyRoots gives an empty parameters object the object root among
+// tools, a namespace's included, and reports whether it changed any.
+func fillEmptyRoots(proto provider.Protocol, tools []any) bool {
+	changed := false
+	for _, t := range tools {
+		tm, _ := t.(map[string]any)
+		if tm == nil {
+			continue
+		}
+		if proto == provider.Responses && tm["type"] == "namespace" {
+			nested, _ := tm["tools"].([]any)
+			if fillEmptyRoots(proto, nested) {
+				changed = true
+			}
+			continue
+		}
+		fn := tm
+		if proto == provider.Chat {
+			fn, _ = tm["function"].(map[string]any)
+		}
+		if ps, _ := fn["parameters"].(map[string]any); ps != nil && len(ps) == 0 {
+			ps["type"] = "object"
+			changed = true
+		}
+	}
+	return changed
+}
+
 // objectRootsBody is a Chat or Responses body whose function tools'
 // parameters have an object root, and whether any was changed.
 func objectRootsBody(proto provider.Protocol, body []byte) ([]byte, bool) {

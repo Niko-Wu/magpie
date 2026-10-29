@@ -1836,6 +1836,15 @@ func newID() string {
 // to every request offering it (#646). A schema that has none is sent as
 // it came.
 func objectSchema(schema json.RawMessage) json.RawMessage {
+	if len(schema) == 0 {
+		return schema
+	}
+	// an empty root ({}) is no object root to a strict upstream, though
+	// a tool's arguments are always an object: given the type it lacks
+	// (#4242, Claude Code's DeferredToolPlaceholder)
+	if bytes.Equal(bytes.TrimSpace(schema), []byte(`{}`)) {
+		return json.RawMessage(`{"type":"object"}`)
+	}
 	if !bytes.Contains(schema, []byte(`Of"`)) {
 		return schema
 	}

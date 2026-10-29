@@ -13,7 +13,142 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// The refusals of a union at a tool's root, as each vendor words them.
+// An empty parameters root ({}) is no object root to an upstream that
+// validates tool definitions strictly: wb2api refuses Claude Code's
+// DeferredToolPlaceholder with "Invalid tool definition" (#4242). A tool's
+// arguments are always an object, so the root is given the type it lacks
+// on every surface, and a schema that has one is left as sent.
+func TestEmptyToolSchemaGetsObjectRoot(t *testing.T) {
+	empty := json.RawMessage(`{}`)
+	r := &Request{Tools: []Tool{{Name: "DeferredToolPlaceholder", Description: "d", Schema: empty}}}
+
+	var chat struct {
+		Tools []struct {
+			Function struct {
+				Parameters map[string]any `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(buildChat(r, "m", "h", false), &chat); err != nil || len(chat.Tools) != 1 {
+		t.Fatalf("chat: %v %+v", err, chat)
+	}
+	if ps := chat.Tools[0].Function.Parameters; ps["type"] != "object" || len(ps) != 1 {
+		t.Fatalf("chat parameters = %v, want {\"type\":\"object\"}", ps)
+	}
+
+	var an struct {
+		Tools []struct {
+			InputSchema map[string]any `json:"input_schema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(buildAnthropic(r, "m"), &an); err != nil || len(an.Tools) != 1 {
+		t.Fatalf("anthropic: %v %+v", err, an)
+	}
+	if ps := an.Tools[0].InputSchema; ps["type"] != "object" || len(ps) != 1 {
+		t.Fatalf("input_schema = %v, want {\"type\":\"object\"}", ps)
+	}
+
+	if ps, _ := responsesTool(r.Tools[0])["parameters"].(json.RawMessage); string(ps) != `{"type":"object"}` {
+		t.Fatalf("responses parameters = %s, want {\"type\":\"object\"}", ps)
+	}
+
+	// A root that already names its type is not touched.
+	plain := `{"type":"object","properties":{"x":{"type":"string"}}}`
+	if got := objectSchema(json.RawMessage(plain)); string(got) != plain {
+		t.Fatalf("a well-formed root was changed: %s", got)
+	}
+}
+
+// The same repair on a body relayed as sent, on Chat and Responses.
+func TestEmptyToolSchemaBodyGetsObjectRoot(t *testing.T) {
+	for proto, body := range map[provider.Protocol]string{
+		provider.Chat:      `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"P","parameters":{}}}]}`,
+		provider.Responses: `{"model":"m","input":[],"tools":[{"type":"function","name":"P","parameters":{}}]}`,
+	} {
+		out, changed := emptyRootsBody(proto, []byte(body))
+		if !changed {
+			t.Fatalf("%v: empty root not changed: %s", proto, out)
+		}
+		var m map[string]any
+		json.Unmarshal(out, &m)
+		tools, _ := m["tools"].([]any)
+		tm, _ := tools[0].(map[string]any)
+		fn := tm
+		if proto == provider.Chat {
+			fn, _ = tm["function"].(map[string]any)
+		}
+		ps, _ := fn["parameters"].(map[string]any)
+		if ps["type"] != "object" {
+			t.Fatalf("%v: parameters = %v, want an object root", proto, ps)
+		}
+	}
+	// A body with no empty root is returned as sent.
+	same := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"P","parameters":{"type":"object"}}}]}`
+	if out, changed := emptyRootsBody(provider.Chat, []byte(same)); changed || string(out) != same {
+		t.Fatalf("a body with an object root was changed: %s", out)
+	}
+}
+
+// The reporter's case (#4242): Claude Code offers a placeholder tool with
+// input_schema {}, and the model resolves to a Chat upstream that validates
+// tools strictly (wb2api, 400 code 11129). The translated request carries
+// an object root on the first ask, so the upstream never refuses it.
+func TestEmptyToolSchemaTranslatedToChat(t *testing.T) {
+	fresh(t)
+	var mu sync.Mutex
+	var got []map[string]any
+	strict := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var q map[string]any
+		json.Unmarshal(b, &q)
+		mu.Lock()
+		got = append(got, q)
+		mu.Unlock()
+		tools, _ := q["tools"].([]any)
+		for _, t := range tools {
+			tm, _ := t.(map[string]any)
+			if fn, ok := tm["function"].(map[string]any); ok {
+				tm = fn
+			}
+			ps, _ := tm["parameters"].(map[string]any)
+			if ps == nil || ps["type"] != "object" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(400)
+				io.WriteString(w, `{"code":11129,"msg":"invalid function call parameters"}`)
+				return
+			}
+		}
+		answer(w, r)
+	}))
+	t.Cleanup(strict.Close)
+	p := provider.Provider{ID: "wb", Name: "WB", Key: "k", Models: []string{"m"}, Chat: strict.URL + "/v1"}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	body := `{"model":"wb/m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
+		`"tools":[{"name":"P","description":"d","input_schema":{}}]}`
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "ok") {
+		t.Fatalf("messages: %d %s", rec.Code, rec.Body)
+	}
+	if len(got) != 1 {
+		t.Fatalf("upstream was asked %d times, want 1", len(got))
+	}
+	t.Logf("upstream body: %v", got[0])
+	tools, _ := got[0]["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("upstream got tools %v, want one", got[0]["tools"])
+	}
+	tm, _ := tools[0].(map[string]any)
+	fn, _ := tm["function"].(map[string]any)
+	ps, _ := fn["parameters"].(map[string]any)
+	if ps["type"] != "object" || len(ps) != 1 {
+		t.Fatalf("upstream got parameters %v, want {\"type\":\"object\"}", ps)
+	}
+}
+
 var rootUnionRefusals = map[string]string{
 	// Grok behind a relay (AiHubMix's grok-4.7, 2026-10-08, its bytes)
 	"xAI": `{"error":{"message":"Failed to start sampling: [invalid_client_tool_schema] mcp__codex_app__automation_update: tool parameter root must be an object type (root schema is an anyOf/oneOf union with a non-object branch) (tid: 2026100808425178410684649237042)","type":"upstream_error","param":"400","code":"bad_response_status_code"}}`,

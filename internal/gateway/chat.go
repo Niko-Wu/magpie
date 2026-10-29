@@ -563,7 +563,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 		for _, t := range r.Tools {
 			fn := map[string]any{"name": t.Name, "description": t.Description}
 			if len(t.Schema) > 0 {
-				fn["parameters"] = t.Schema
+				fn["parameters"] = emptyObjectRoot(t.Schema)
 			}
 			tools = append(tools, map[string]any{"type": "function", "function": fn})
 		}

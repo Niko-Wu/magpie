@@ -4788,6 +4788,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if dropImage && !s.fits(p.ID, imageToolRefused, proto) {
 		body, _ = withoutImageTool(body)
 	}
+	// a tool's parameters with no root at all, to any upstream that
+	// validates tools strictly (object_root.go, #4242)
+	body, _ = emptyRootsBody(proto, body)
 	// a tool with a union at its parameters' root, to an upstream that
 	// takes none (object_root.go, #1271)
 	if s.foldsRoots(p, model, proto) {
