@@ -1733,7 +1733,7 @@ func (p Provider) FreeModel(model string) bool {
 func (p Provider) Known(model string) []string {
 	for _, m := range p.Available() {
 		if m.ID == model {
-			return effortsOf(m)
+			return effortsFor(p, m)
 		}
 	}
 	// one of Devin's variants an agent was set to, which the list offers as
@@ -1786,6 +1786,39 @@ func effortsOf(m catalog.Model) []string {
 		return m.Efforts
 	}
 	return borrowedEfforts(m.ID)
+}
+
+// effortsFor is effortsOf with the off level a borrowed list may leave out:
+// Volcengine Ark turns its deepseek-v4 models' thinking off with
+// thinking.type=disabled, as its own console sends it, where the levels it
+// borrows from DeepSeek's listing say low, high and max alone (pintaste,
+// #1098). Only Ark's own API is verified to take it: another provider
+// borrowing the same levels need not.
+func effortsFor(p Provider, m catalog.Model) []string {
+	e := effortsOf(m)
+	if AtArk(p) && ArkThinksOff(m.ID) && len(e) > 0 && !slices.Contains(e, "none") {
+		return append([]string{"none"}, e...)
+	}
+	return e
+}
+
+// AtArk is a provider at Volcengine Ark (ark.<region>.volces.com): the
+// preset's plans or a provider added by hand on pay-as-you-go.
+func AtArk(p Provider) bool {
+	for _, base := range []string{p.Base(Chat), p.Base(Responses)} {
+		if h := HostOf(base); strings.HasPrefix(h, "ark.") && strings.HasSuffix(h, ".volces.com") {
+			return true
+		}
+	}
+	return false
+}
+
+// ArkThinksOff is a model Volcengine Ark's API turns thinking off for with
+// thinking.type=disabled: its deepseek-v4 line. The reporter measured no
+// reasoning tokens for thinking.type=disabled on deepseek-v4-flash, where
+// reasoning_effort=none was not a level the channel offered (#1098).
+func ArkThinksOff(id string) bool {
+	return strings.HasPrefix(strings.ToLower(id), "deepseek-v4")
 }
 
 // borrowedEfforts are the reasoning levels of a model its provider has no
@@ -2617,7 +2650,7 @@ func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
 	// a model its vendor lists with no name is called by its id: unnamed,
 	// an agent's list showed the whole magpie/<provider>/<model> (#955)
 	name := cmp.Or(m.Name, m.ID)
-	e := Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: name, Efforts: effortsOf(m), Provider: p,
+	e := Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: name, Efforts: effortsFor(p, m), Provider: p,
 		Images: images, ImageInput: imageInput, Context: ctx, WindowSet: p.ContextOf(m.ID) > 0, Output: output, OutputSet: outputOf(s, p.ID, m.ID) > 0, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas, Tiers: m.Tiers, Released: m.Released,
 		Inputs: m.InputModalities, Outputs: m.OutputModalities, Codex: m.Codex}
 	if lv, ok := catalog.CodexLevels(m.Codex); ok {

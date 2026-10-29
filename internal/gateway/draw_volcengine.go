@@ -33,14 +33,7 @@ import (
 
 // isArk is a provider at Volcengine Ark (ark.<region>.volces.com): the
 // preset's plans or a provider added by hand on pay-as-you-go.
-var isArk = func(p provider.Provider) bool {
-	for _, base := range []string{p.Base(provider.Chat), p.Base(provider.Responses)} {
-		if h := provider.HostOf(base); strings.HasPrefix(h, "ark.") && strings.HasSuffix(h, ".volces.com") {
-			return true
-		}
-	}
-	return false
-}
+var isArk = func(p provider.Provider) bool { return provider.AtArk(p) }
 
 // arkRatioSizes are the 2K sizes Ark's doc lists for each ratio (Seedream
 // 4.0, 4.5 and 5.0 lite's table). Each is in every Seedream model's pixel

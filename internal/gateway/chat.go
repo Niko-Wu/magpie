@@ -320,6 +320,15 @@ func chatReplaysReasoning(host, model string) bool {
 	return strings.Contains(host, "deepseek") || strings.Contains(strings.ToLower(model), "deepseek") || host == provider.CommandCodePlanID || host == "qoder" || host == "qoder-cn"
 }
 
+// arkThinksOff is a model at Volcengine Ark which that API turns thinking
+// off for with thinking.type=disabled rather than an effort: its
+// deepseek-v4 line, whose levels Ark's channel borrows from DeepSeek's
+// listing, which has no off level (#1098).
+func arkThinksOff(host, model string) bool {
+	return strings.HasPrefix(host, "ark.") && strings.HasSuffix(host, ".volces.com") &&
+		strings.HasPrefix(strings.ToLower(model), "deepseek-v4")
+}
+
 func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	var msgs []map[string]any
 	if r.System != "" {
@@ -556,7 +565,14 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			out["reasoning_effort"] = r.Effort
 		}
 	} else if r.Effort != "" {
-		out["reasoning_effort"] = r.Effort
+		if r.Effort == "none" && arkThinksOff(host, model) {
+			// Ark turns its DeepSeek models' thinking off with
+			// thinking.type, as its own console sends it: reasoning_effort
+			// is no level it lists for them (pintaste, #1098)
+			out["thinking"] = map[string]any{"type": "disabled"}
+		} else {
+			out["reasoning_effort"] = r.Effort
+		}
 	}
 	if len(r.Tools) > 0 {
 		var tools []map[string]any

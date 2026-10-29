@@ -73,6 +73,53 @@ func TestHostListIsNoMakersWord(t *testing.T) {
 	}
 }
 
+// A provider borrowing DeepSeek's levels takes none of its own: what
+// accepts "none" is DeepSeek's API, not a reseller's. Volcengine Ark's is
+// verified to turn its deepseek-v4 models' thinking off as well, with
+// thinking.type=disabled, so its entries say the off level and a relay's
+// do not (pintaste, #1098).
+func TestArkDeepseekOffersThinkingOff(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	body, err := os.ReadFile(filepath.Join("..", "catalog", "testdata", "models.dev-2026-10-09.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(catalog.CachePath(), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
+
+	for _, tc := range []struct {
+		p    Provider
+		want string
+	}{
+		{Provider{ID: "volcengine", Name: "Ark", Chat: "https://ark.cn-beijing.volces.com/api/v3", Key: "k", Models: []string{"deepseek-v4-pro"}}, "none,low,high,max"},
+		{Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Key: "k", Models: []string{"deepseek-v4-pro"}}, "low,high,max"},
+	} {
+		if err := Save(tc.p); err != nil {
+			t.Fatal(err)
+		}
+		if err := catalog.SaveLive(tc.p.ID, tc.p.Chat, []catalog.Model{{ID: "deepseek-v4-pro"}}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Find(tc.p.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lv := strings.Join(got.Efforts("deepseek-v4-pro"), ","); lv != tc.want {
+			t.Errorf("%s: levels %q, want %q", tc.p.ID, lv, tc.want)
+		}
+	}
+}
+
 func TestBorrowedOffLevelIsNotAdvertised(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
